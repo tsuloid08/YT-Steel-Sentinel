@@ -150,6 +150,27 @@ class DownloaderApp:
         # Etiqueta para mostrar el tiempo total.
         self.time_label_total.pack(side=tk.LEFT)
 
+        # --- Controles para el Timeline (Reducir Lag) ---
+        # Estos controles ayudan a reducir el lag durante la reproducción
+        
+        self.timeline_options_frame = tk.Frame(root)
+        self.timeline_options_frame.pack(pady=5)
+        
+        self.disable_timeline_var = tk.BooleanVar(value=False)
+        self.disable_timeline_check = tk.Checkbutton(
+            self.timeline_options_frame, 
+            text="Deshabilitar actualizaciones de timeline (reduce lag)",
+            variable=self.disable_timeline_var,
+            command=self.toggle_timeline_updates
+        )
+        self.disable_timeline_check.pack(side=tk.LEFT, padx=5)
+        
+        tk.Label(self.timeline_options_frame, text="Intervalo (ms):").pack(side=tk.LEFT)
+        self.timeline_interval_var = tk.StringVar(value="3000")
+        self.timeline_interval_entry = tk.Entry(self.timeline_options_frame, width=6, textvariable=self.timeline_interval_var)
+        self.timeline_interval_entry.pack(side=tk.LEFT, padx=5)
+        self.timeline_interval_entry.bind('<Return>', self.update_timeline_interval)
+
         # --- Botones para Descargar (Guardar la Música) ---
         # Estos son los botones para guardar la música o el video en tu computadora.
 
@@ -194,6 +215,12 @@ class DownloaderApp:
         
         self.timeline_update_job = None
         # Aquí guardamos el trabajo de actualizar la barra de tiempo.
+        
+        self.timeline_update_interval = 3000  # Actualizar cada 3 segundos para evitar lag
+        # Intervalo de actualización del timeline en milisegundos
+        
+        self.disable_timeline_updates = False
+        # Opción para deshabilitar actualizaciones del timeline completamente
 
         self.load_last_folder()
         # Al principio, el programa intenta recordar la última carpeta que usaste.
@@ -282,73 +309,93 @@ class DownloaderApp:
         # ¡Empezamos la magia en la otra mano!
 
     def execute_preview(self, url):
-        # Esta es la magia principal para encontrar la música y hacerla sonar.
-        # 'url' es la dirección de YouTube.
         logging.info("=== EJECUTANDO PREVIEW ===")
         try:
+            # Deshabilitar el botón para prevenir clics múltiples
+            self.root.after(0, lambda: self.preview_audio_button.config(state=tk.DISABLED))
+            
             # Actualizaciones seguras de la GUI
             self.root.after(0, lambda: self.progress_text.insert(tk.END, "Descargando audio temporal para previsualización...\n"))
             
-            # Configurar yt-dlp para descargar el mejor audio a un archivo temporal
-            with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as temp_audio:
-                temp_filename = temp_audio.name
+            # Crear nombre base para el archivo temporal (sin extensión)
+            with tempfile.NamedTemporaryFile(delete=False) as temp_audio:
+                temp_filename_base = temp_audio.name
+            
+            logging.info(f"Nombre base para archivo temporal: {temp_filename_base}")
+            
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': temp_filename_base + '.%(ext)s',  # Usar template explícito para la extensión
+                'quiet': True,
+                'noprogress': True,
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                logging.info("Descargando audio temporal...")
+                info = ydl.extract_info(url, download=True)
                 
-                ydl_opts = {
-                    'format': 'bestaudio/best',
-                    'outtmpl': temp_filename,
-                    'quiet': True,
-                    'noprogress': True,
-                    'progress_hooks': [self.progress_hook],  # Reutiliza tu hook de progreso si quieres mostrar avance
-                }
+                # Construir el nombre del archivo usando la extensión de la info
+                actual_filename = f"{temp_filename_base}.{info['ext']}"
+                logging.info(f"Archivo esperado: {actual_filename}")
                 
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    logging.info("Descargando audio temporal...")
-                    info = ydl.extract_info(url, download=True)  # Ahora download=True para guardar el archivo
-                    logging.info(f"Audio descargado a: {temp_filename}")
-                    
-                    # Obtenemos la duración del audio desde la información de YouTube
-                    self.audio_duration = info.get('duration', 0)
-                    logging.info(f"Duración del audio: {self.audio_duration} segundos")
+                # También buscar archivos con glob como respaldo
+                import glob
+                possible_files = glob.glob(f"{temp_filename_base}.*")
+                logging.info(f"Archivos encontrados con glob: {possible_files}")
+                
+                # Verificar si el archivo esperado existe
+                if os.path.exists(actual_filename):
+                    logging.info(f"Archivo encontrado en ubicación esperada: {actual_filename}")
+                elif possible_files:
+                    actual_filename = possible_files[0]
+                    logging.info(f"Usando archivo encontrado con glob: {actual_filename}")
+                else:
+                    # Listar contenido del directorio temporal para debug
+                    temp_dir = os.path.dirname(temp_filename_base)
+                    temp_files = os.listdir(temp_dir) if os.path.exists(temp_dir) else []
+                    logging.error(f"Contenido del directorio temporal {temp_dir}: {temp_files}")
+                    raise Exception(f"No se encontró archivo descargado. Esperado: {actual_filename}, Encontrados: {possible_files}")
+                
+                # Verificar si el archivo existe y tiene tamaño > 0
+                if not os.path.exists(actual_filename) or os.path.getsize(actual_filename) == 0:
+                    raise Exception(f"Archivo temporal no creado o vacío: {actual_filename}")
+                
+                # Obtenemos la duración del audio desde la información de YouTube
+                self.audio_duration = info.get('duration', 0)
+                logging.info(f"Duración del audio: {self.audio_duration} segundos")
 
             logging.info("Deteniendo preview anterior si existe")
             self.stop_preview()
-            # Si ya estaba sonando otra música, la detenemos primero.
 
             logging.info("Creando MediaPlayer con archivo local...")
-            self.player = MediaPlayer(temp_filename)
-            self.temp_audio_file = temp_filename  # Guardamos la referencia para borrarlo después
+            self.player = MediaPlayer(actual_filename)
+            self.temp_audio_file = actual_filename  # Guardamos la referencia para borrarlo después
             logging.info("MediaPlayer creado exitosamente")
-            # Creamos nuestro reproductor de música y le damos el archivo temporal local.
             
-            # Actualizaciones seguras de la GUI (¡muy importante para que la ventana no se cierre!)
+            # Actualizaciones seguras de la GUI
             logging.info("Actualizando GUI - habilitando botones")
             self.root.after(0, lambda: self.play_pause_button.config(state=tk.NORMAL))
-            # Le decimos al botón de "Reproducir/Pausar" que se "despierte" y se pueda presionar.
             self.root.after(0, lambda: self.stop_button.config(state=tk.NORMAL))
-            # Le decimos al botón de "Detener" que también se "despierte".
             self.root.after(0, lambda: self.timeline_scale.config(state=tk.NORMAL))
-            # Despertamos la barra de tiempo para que se pueda usar.
+            
             logging.info("Configurando timeline...")
             self.root.after(0, lambda: self.setup_timeline())
-            # Configuramos la barra de tiempo con la duración correcta.
+            
             logging.info("Iniciando actualizaciones de timeline...")
-            # Dar tiempo al MediaPlayer para inicializarse completamente antes de empezar actualizaciones
-            self.root.after(1500, lambda: self.start_timeline_updates())
-            # Empezamos a actualizar la barra de tiempo.
+            # Aumentar el delay inicial para dar tiempo al reproductor de estabilizarse
+            self.root.after(2500, lambda: self.start_timeline_updates())
+            
             self.root.after(0, lambda: self.progress_text.insert(tk.END, "Previsualización lista. Presiona Reproducir/Pausar.\n"))
-            # Escribimos en nuestro cuaderno que la música está lista.
             logging.info("=== PREVIEW CONFIGURADO EXITOSAMENTE ===")
 
         except Exception as e:
-            # Si algo sale mal al buscar la música...
             logging.error(f"Error en execute_preview: {e}", exc_info=True)
             error_message = f"Ha ocurrido un error inesperado: {e}"
-            # Guardamos el mensaje de error.
-            # Mensajes de error seguros para la GUI
-            self.root.after(0, lambda: messagebox.showerror("Error de Previsualización", f"No se pudo obtener el audio: {e}"))
-            # Aparece un cartelito de error grande.
-            self.root.after(0, lambda: self.progress_text.insert(tk.END, f"\nError al previsualizar: {e}"))
-            # Escribimos el error en nuestro cuaderno.
+            self.root.after(0, lambda: messagebox.showerror("Error de Previsualización", f"No se pudo obtener el audio: {str(e)}"))
+            self.root.after(0, lambda: self.progress_text.insert(tk.END, f"\nError al previsualizar: {str(e)}"))
+        finally:
+            # Siempre re-habilitar el botón al final (éxito o error)
+            self.root.after(0, lambda: self.preview_audio_button.config(state=tk.NORMAL))
 
     def toggle_play_pause(self):
         # Esta es la magia para que la música se pause o siga sonando.
@@ -379,8 +426,19 @@ class DownloaderApp:
         # Borrar el archivo temporal si existe
         if self.temp_audio_file and os.path.exists(self.temp_audio_file):
             try:
+                # Borrar el archivo
                 os.remove(self.temp_audio_file)
                 logging.info(f"Archivo temporal borrado: {self.temp_audio_file}")
+                
+                # Borrar el directorio temporal si está vacío
+                temp_dir = os.path.dirname(self.temp_audio_file)
+                try:
+                    os.rmdir(temp_dir)
+                    logging.info(f"Directorio temporal borrado: {temp_dir}")
+                except OSError:
+                    # El directorio no está vacío o no se puede borrar, no es crítico
+                    pass
+                    
             except Exception as e:
                 logging.warning(f"No se pudo borrar el archivo temporal: {e}")
             self.temp_audio_file = None
@@ -428,21 +486,7 @@ class DownloaderApp:
         download_thread.start()
         # ¡Empezamos la magia de descarga!
 
-    def progress_hook(self, d):
-        # Esta es una pequeña ayuda para el detective de YouTube (yt_dlp).
-        # Le dice al programa cómo va la descarga.
-        if d['status'] == 'downloading':
-            # Si está descargando...
-            line = d['_default_template']
-            # Obtenemos el mensaje de progreso.
-            # Actualizaciones seguras de la GUI
-            self.root.after(0, lambda: self.progress_text.insert(tk.END, line + '\r'))
-            self.root.after(0, lambda: self.progress_text.see(tk.END))
-        elif d['status'] == 'finished':
-            # Si terminó de descargar...
-            # Actualizaciones seguras de la GUI
-            self.root.after(0, lambda: self.progress_text.insert(tk.END, "\nDescarga finalizada, procesando...\n"))
-            self.root.after(0, lambda: self.progress_text.see(tk.END))
+
 
     def execute_download(self, url, download_type):
         # Esta es la magia principal para descargar la música o el video.
@@ -455,7 +499,7 @@ class DownloaderApp:
                 ydl_opts = {
                     'format': 'bestvideo+bestaudio/best',  # Queremos el mejor video y audio.
                     'outtmpl': output_template,  # Dónde guardarlo.
-                    'progress_hooks': [self.progress_hook],  # Para ver el progreso.
+                    'quiet': True,
                     'noprogress': True, # No queremos que yt-dlp muestre su propia barra de progreso.
                 }
             else:  # audio
@@ -468,7 +512,7 @@ class DownloaderApp:
                         'preferredcodec': 'mp3',  # Para que sea un archivo MP3.
                         'preferredquality': '192',  # Con buena calidad.
                     }],
-                    'progress_hooks': [self.progress_hook],  # Para ver el progreso.
+                    'quiet': True,
                     'noprogress': True, # No queremos que yt-dlp muestre su propia barra de progreso.
                 }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -496,8 +540,8 @@ class DownloaderApp:
         try:
             if self.audio_duration > 0:
                 # Si sabemos cuánto dura la canción...
-                self.timeline_scale.config(to=self.audio_duration)
-                # Configuramos la barra para que vaya de 0 hasta la duración total.
+                self.timeline_scale.config(to=self.audio_duration, resolution=0.1)
+                # Configuramos la barra para que vaya de 0 hasta la duración total con resolución fina.
                 total_time = self.format_time(self.audio_duration)
                 # Convertimos los segundos a formato "mm:ss".
                 self.time_label_total.config(text=total_time)
@@ -505,7 +549,7 @@ class DownloaderApp:
                 logging.info(f"Timeline configurado: 0 a {self.audio_duration}, tiempo total: {total_time}")
             else:
                 # Si no sabemos la duración...
-                self.timeline_scale.config(to=100)
+                self.timeline_scale.config(to=100, resolution=0.1)
                 # Usamos 100 como máximo temporal.
                 self.time_label_total.config(text="--:--")
                 # Mostramos guiones en lugar del tiempo.
@@ -523,6 +567,11 @@ class DownloaderApp:
         # Esta es la magia que actualiza la posición de la barra de tiempo.
         logging.debug("update_timeline() llamado")
         try:
+            # Si las actualizaciones están deshabilitadas, no hacer nada
+            if self.disable_timeline_updates:
+                logging.debug("Actualizaciones de timeline deshabilitadas")
+                return
+                
             if self.player and not self.is_seeking:
                 # Si tenemos un reproductor y no estamos moviendo la barra manualmente...
                 logging.debug("Player existe y no estamos seeking, obteniendo tiempo actual...")
@@ -532,14 +581,28 @@ class DownloaderApp:
                         current_time = self.player.get_pts()
                         logging.debug(f"Tiempo actual obtenido: {current_time}")
                         
-                        # Validar que el tiempo sea un número válido
-                        if current_time is not None and isinstance(current_time, (int, float)) and current_time >= 0:
-                            # Si el tiempo es válido...
-                            logging.debug(f"Actualizando timeline a posición: {current_time}")
-                            # Usar root.after para actualizaciones seguras de GUI
-                            self.root.after(0, lambda t=current_time: self._update_timeline_gui(t))
+                        # Clamp PTS to prevent overflow beyond duration
+                        if current_time is not None and isinstance(current_time, (int, float)):
+                            if current_time > self.audio_duration:
+                                logging.warning(f"PTS excedió duración ({current_time} > {self.audio_duration}), pausando player")
+                                current_time = self.audio_duration
+                                try:
+                                    self.player.set_pause(True)  # Pause when reaching end
+                                except:
+                                    pass
+                            
+                            # Validar que el tiempo sea un número válido y dentro de rango
+                            if 0 <= current_time <= self.audio_duration + 1:
+                                # Si el tiempo es válido...
+                                logging.debug(f"Actualizando timeline a posición: {current_time}")
+                                # Usar root.after para actualizaciones seguras de GUI
+                                self.root.after(0, lambda t=current_time: self._update_timeline_gui(t))
+                            else:
+                                logging.debug(f"Tiempo inválido recibido: {current_time} - Deteniendo player")
+                                self.stop_preview()  # Stop if stuck/invalid
                         else:
-                            logging.debug(f"Tiempo inválido recibido: {current_time}")
+                            logging.debug(f"Tiempo inválido recibido: {current_time} - tipo incorrecto")
+                            self.stop_preview()  # Stop if stuck/invalid
                     else:
                         logging.warning("Player no tiene método get_pts disponible")
                 except Exception as e:
@@ -551,23 +614,28 @@ class DownloaderApp:
                 if self.is_seeking:
                     logging.debug("Saltando actualización porque estamos seeking")
             
-            # Programamos la próxima actualización en 1000 milisegundos (1 segundo) para reducir carga
+            # Programamos la próxima actualización usando el intervalo configurable
             if self.player:
-                logging.debug("Programando próxima actualización de timeline en 1000ms")
-                self.timeline_update_job = self.root.after(1000, self.update_timeline)
+                logging.debug(f"Programando próxima actualización de timeline en {self.timeline_update_interval}ms")
+                self.timeline_update_job = self.root.after(self.timeline_update_interval, self.update_timeline)
             else:
                 logging.debug("No hay player, no programando próxima actualización")
         except Exception as e:
             logging.error(f"Error crítico en update_timeline: {e}", exc_info=True)
-            # Intentar continuar con las actualizaciones después de un error
+            # Intentar continuar con las actualizaciones después de un error con intervalo mayor
             if self.player:
-                self.timeline_update_job = self.root.after(2000, self.update_timeline)
+                self.timeline_update_job = self.root.after(self.timeline_update_interval * 2, self.update_timeline)
 
     def _update_timeline_gui(self, current_time):
         # Método auxiliar para actualizar la GUI de forma segura
         try:
+            # Temporarily disable command to prevent triggering on_timeline_change
+            original_command = self.timeline_scale.cget('command')
+            self.timeline_scale.config(command=None)
             self.timeline_scale.set(current_time)
-            # Movemos la barra a la posición correcta.
+            # Restore command
+            self.timeline_scale.config(command=original_command)
+            
             formatted_time = self.format_time(current_time)
             # Convertimos el tiempo a formato "mm:ss".
             self.time_label_current.config(text=formatted_time)
@@ -602,27 +670,41 @@ class DownloaderApp:
             # Marcamos que estamos buscando una posición específica.
             try:
                 seek_time = float(value)
-                # Convertimos el valor de la barra a un número decimal.
+                # Clamp to valid range to avoid errors
+                seek_time = max(0, min(seek_time, self.audio_duration))
                 logging.debug(f"Seeking a posición: {seek_time}")
                 
-                # Verificar que el tiempo esté dentro del rango válido
-                if 0 <= seek_time <= self.audio_duration:
-                    self.player.seek(seek_time)
-                    # Le decimos al reproductor que vaya a esa posición.
-                    formatted_time = self.format_time(seek_time)
-                    # Convertimos el tiempo a formato "mm:ss".
-                    self.time_label_current.config(text=formatted_time)
-                    # Actualizamos la etiqueta del tiempo actual.
-                    logging.debug(f"Seek exitoso a: {formatted_time}")
-                else:
-                    logging.warning(f"Tiempo de seek fuera de rango: {seek_time}")
+                # Check if player is currently playing to restore state after seek
+                was_playing = False
+                try:
+                    was_playing = not self.player.get_pause()
+                except:
+                    pass  # If we can't get pause state, continue anyway
+                
+                # Pause during seek to prevent advance during debounce
+                if was_playing:
+                    self.player.set_pause(True)
+                
+                # Seek with accurate positioning to avoid keyframe snapping
+                self.player.seek(seek_time, relative=False, accurate=True)
+                
+                # Restore playing state if it was playing before
+                if was_playing:
+                    self.player.set_pause(False)
+                
+                # Le decimos al reproductor que vaya a esa posición.
+                formatted_time = self.format_time(seek_time)
+                # Convertimos el tiempo a formato "mm:ss".
+                self.time_label_current.config(text=formatted_time)
+                # Actualizamos la etiqueta del tiempo actual.
+                logging.debug(f"Seek exitoso a: {formatted_time}")
             except Exception as e:
                 # Si algo sale mal al buscar, lo registramos.
                 logging.error(f"Error en seek: {e}", exc_info=True)
             finally:
                 # Siempre, al final...
-                self.root.after(1500, lambda: setattr(self, 'is_seeking', False))
-                # Después de 1.5 segundos, marcamos que ya no estamos buscando.
+                self.root.after(200, lambda: setattr(self, 'is_seeking', False))
+                # Después de 0.2 segundos, marcamos que ya no estamos buscando.
 
     def format_time(self, seconds):
         # Esta magia convierte segundos a formato "mm:ss".
@@ -636,6 +718,40 @@ class DownloaderApp:
         # Calculamos los segundos restantes.
         return f"{minutes:02d}:{seconds:02d}"
         # Devolvemos el tiempo en formato "mm:ss".
+
+    def toggle_timeline_updates(self):
+        # Esta función habilita o deshabilita las actualizaciones del timeline
+        self.disable_timeline_updates = self.disable_timeline_var.get()
+        if self.disable_timeline_updates:
+            # Si se deshabilitan las actualizaciones
+            self.progress_text.insert(tk.END, "Actualizaciones de timeline deshabilitadas para reducir lag.\n")
+            self.stop_timeline_updates()
+        else:
+            # Si se habilitan las actualizaciones
+            self.progress_text.insert(tk.END, "Actualizaciones de timeline habilitadas.\n")
+            if self.player:
+                self.start_timeline_updates()
+
+    def update_timeline_interval(self, event=None):
+        # Esta función actualiza el intervalo de actualización del timeline
+        try:
+            new_interval = int(self.timeline_interval_var.get())
+            if new_interval < 100:
+                new_interval = 100  # Mínimo 100ms
+            elif new_interval > 10000:
+                new_interval = 10000  # Máximo 10 segundos
+            
+            self.timeline_update_interval = new_interval
+            self.timeline_interval_var.set(str(new_interval))
+            self.progress_text.insert(tk.END, f"Intervalo de actualización cambiado a {new_interval}ms.\n")
+            
+            # Si hay actualizaciones activas, reiniciarlas con el nuevo intervalo
+            if self.player and not self.disable_timeline_updates:
+                self.stop_timeline_updates()
+                self.start_timeline_updates()
+        except ValueError:
+            self.progress_text.insert(tk.END, "Por favor ingresa un número válido para el intervalo.\n")
+            self.timeline_interval_var.set(str(self.timeline_update_interval))
 
     def update_ram_usage(self):
         # Esta función obtiene y muestra el uso de RAM del programa.
