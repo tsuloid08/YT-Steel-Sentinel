@@ -30,6 +30,7 @@ from ffpyplayer.player import MediaPlayer # Esta es la herramienta para que la m
 
 import psutil # Esta herramienta nos ayuda a obtener información del sistema, como el uso de RAM.
 import logging # Esta herramienta nos ayuda a escribir mensajes de depuración para encontrar problemas.
+import tempfile # Esta herramienta nos ayuda a crear archivos temporales para la previsualización.
 
 # Configurar el sistema de logging
 logging.basicConfig(
@@ -179,6 +180,9 @@ class DownloaderApp:
         self.player = None
         # Aquí guardamos nuestro reproductor de música cuando está funcionando. Al principio, no hay ninguno.
 
+        self.temp_audio_file = None
+        # Aquí guardamos la referencia al archivo temporal de audio para poder borrarlo después.
+
         # --- Variables para la Barra de Tiempo ---
         # Estas son las notas especiales para controlar la línea de tiempo.
         
@@ -282,33 +286,39 @@ class DownloaderApp:
         # 'url' es la dirección de YouTube.
         logging.info("=== EJECUTANDO PREVIEW ===")
         try:
-            # Intentamos hacer esta magia.
-            logging.info("Configurando yt-dlp para obtener mejor audio")
-            ydl_opts = {'format': 'bestaudio/best'}
-            # Le decimos a nuestro detective de YouTube (yt_dlp) que solo queremos la mejor música.
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # Le damos las instrucciones al detective.
-                logging.info("Extrayendo información del video...")
-                info = ydl.extract_info(url, download=False)
-                # El detective va a YouTube y encuentra toda la información de la música, pero no la descarga todavía.
-                # 'download=False' significa "solo dime dónde está, no la bajes".
-                audio_url = info['url']
-                logging.info(f"URL de audio obtenida: {audio_url[:100]}...")
-                # De toda la información, sacamos la dirección secreta de la música.
+            # Actualizaciones seguras de la GUI
+            self.root.after(0, lambda: self.progress_text.insert(tk.END, "Descargando audio temporal para previsualización...\n"))
+            
+            # Configurar yt-dlp para descargar el mejor audio a un archivo temporal
+            with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as temp_audio:
+                temp_filename = temp_audio.name
+                
+                ydl_opts = {
+                    'format': 'bestaudio/best',
+                    'outtmpl': temp_filename,
+                    'quiet': True,
+                    'noprogress': True,
+                    'progress_hooks': [self.progress_hook],  # Reutiliza tu hook de progreso si quieres mostrar avance
+                }
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    logging.info("Descargando audio temporal...")
+                    info = ydl.extract_info(url, download=True)  # Ahora download=True para guardar el archivo
+                    logging.info(f"Audio descargado a: {temp_filename}")
+                    
+                    # Obtenemos la duración del audio desde la información de YouTube
+                    self.audio_duration = info.get('duration', 0)
+                    logging.info(f"Duración del audio: {self.audio_duration} segundos")
 
             logging.info("Deteniendo preview anterior si existe")
             self.stop_preview()
             # Si ya estaba sonando otra música, la detenemos primero.
 
-            logging.info("Creando MediaPlayer...")
-            self.player = MediaPlayer(audio_url)
+            logging.info("Creando MediaPlayer con archivo local...")
+            self.player = MediaPlayer(temp_filename)
+            self.temp_audio_file = temp_filename  # Guardamos la referencia para borrarlo después
             logging.info("MediaPlayer creado exitosamente")
-            # Creamos nuestro reproductor de música y le damos la dirección secreta de la música.
-            
-            # Obtenemos la duración del audio desde la información de YouTube
-            self.audio_duration = info.get('duration', 0)
-            logging.info(f"Duración del audio: {self.audio_duration} segundos")
-            # Guardamos cuánto dura la canción completa.
+            # Creamos nuestro reproductor de música y le damos el archivo temporal local.
             
             # Actualizaciones seguras de la GUI (¡muy importante para que la ventana no se cierre!)
             logging.info("Actualizando GUI - habilitando botones")
@@ -366,19 +376,28 @@ class DownloaderApp:
             self.player = None
             # Borramos el reproductor para que no quede nada.
             
-            # Actualizaciones seguras de la GUI
-            self.root.after(0, lambda: self.play_pause_button.config(state=tk.DISABLED))
-            # Le decimos al botón de "Reproducir/Pausar" que se "duerma" de nuevo.
-            self.root.after(0, lambda: self.stop_button.config(state=tk.DISABLED))
-            # Le decimos al botón de "Detener" que también se "duerma".
-            self.root.after(0, lambda: self.timeline_scale.config(state=tk.DISABLED))
-            # Dormimos la barra de tiempo también.
-            self.root.after(0, lambda: self.stop_timeline_updates())
-            # Detenemos las actualizaciones de la barra de tiempo.
-            self.root.after(0, lambda: self.reset_timeline())
-            # Reiniciamos la barra de tiempo a cero.
-            self.root.after(0, lambda: self.progress_text.insert(tk.END, "Previsualización detenida.\n"))
-            # Escribimos en nuestro cuaderno que la música se detuvo.
+        # Borrar el archivo temporal si existe
+        if self.temp_audio_file and os.path.exists(self.temp_audio_file):
+            try:
+                os.remove(self.temp_audio_file)
+                logging.info(f"Archivo temporal borrado: {self.temp_audio_file}")
+            except Exception as e:
+                logging.warning(f"No se pudo borrar el archivo temporal: {e}")
+            self.temp_audio_file = None
+            
+        # Actualizaciones seguras de la GUI
+        self.root.after(0, lambda: self.play_pause_button.config(state=tk.DISABLED))
+        # Le decimos al botón de "Reproducir/Pausar" que se "duerma" de nuevo.
+        self.root.after(0, lambda: self.stop_button.config(state=tk.DISABLED))
+        # Le decimos al botón de "Detener" que también se "duerma".
+        self.root.after(0, lambda: self.timeline_scale.config(state=tk.DISABLED))
+        # Dormimos la barra de tiempo también.
+        self.root.after(0, lambda: self.stop_timeline_updates())
+        # Detenemos las actualizaciones de la barra de tiempo.
+        self.root.after(0, lambda: self.reset_timeline())
+        # Reiniciamos la barra de tiempo a cero.
+        self.root.after(0, lambda: self.progress_text.insert(tk.END, "Previsualización detenida.\n"))
+        # Escribimos en nuestro cuaderno que la música se detuvo.
 
     # --- Magia para Descargar (Métodos de Descarga) ---
     # Estas son las instrucciones para guardar la música o el video.
@@ -642,7 +661,7 @@ if __name__ == "__main__":
     def on_closing():
         # Esta es una pequeña magia que se activa cuando intentas cerrar la ventana.
         app.stop_preview()
-        # Le decimos a la aplicación que detenga cualquier música que esté sonando.
+        # Le decimos a la aplicación que detenga cualquier música que esté sonando y limpie archivos temporales.
         root.destroy()
         # Y luego cerramos la ventana por completo.
 
